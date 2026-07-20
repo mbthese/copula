@@ -1,0 +1,912 @@
+---
+title: "Copula intro"
+output: html_document
+date: "2026-06-26"
+editor_options: 
+  chunk_output_type: console
+---
+
+#intro copulation 
+
+https://www.r-bloggers.com/2015/10/modelling-dependence-with-copulas-in-r/
+
+
+
+```{r}
+library(MASS)
+set.seed(100)
+
+m <- 3
+n <- 2000
+
+sigma <- matrix(c(1, 0.4, 0.2,
+                  0.4, 1, -0.8, 
+                  0.2, -0.8, 1), 
+                  nrow =3)
+
+z <-  mvrnorm(n, mu = rep(0, m), Sigma = sigma, empirical =T) #simulate a multivariate normal distribution, 3 vectors
+
+
+
+
+```
+
+
+Now we will check the correaltions. We will set the method to spearman.
+
+this is not strictly necessary in our example since we are going to use an *elliptical copula*, 
+if you use *non*-elliptical copulas you may want to use either Spearman’s Rho or Kendall’s Tau
+
+```{r}
+library(psych)
+cor(z, method = "spearman") 
+pairs.panels(z)
+```
+recall that if X is a random variable with distribution F then F(X) is uniformly distributed in the interval [0, 1]. In our toy example we already know the distribution (F) for each of the three random variables so this part is quick and straightforward.
+
+```{r}
+u <- pnorm(z)
+pairs.panels(u)
+
+#Note that each distribution is uniform in the [0,1] interval.
+#note that we have the same correlation, the transformation applied did not change that.
+#Basically we are left only with what is often referred as the dependence structure.
+```
+
+```{r}
+library(rgl)
+plot3d(u[,1], u[,2], u[,3], pch=20, col='navyblue')
+
+```
+
+Now, as a last step, we only need to select the marginals and apply them to u
+I chose the marginals to be Gamma, Beta and Student distributed with the parameters specified below.
+
+```{r}
+x1 <- qgamma(u[,1], shape =2, scale =1)
+x2 <- qbeta(u[,2], 2, 2)
+x3 <- qt(u[,3], df=5)
+
+plot3d(x1, x2, x3, pch=20, col = 'blue')
+
+#What is worth noticing is that by starting from a multivariate normal sample we have build a sample with the desired and fixed dependence structure and, basically, arbitrary marginals.
+```
+
+```{r}
+df <- cbind(x1, x2, x3)
+pairs.panels(df)
+cor(df, method = 'spearman')
+#Again, I would like to emphasize that I chose totally arbitrary marginals. I could have chosen any marginal as long as it was a continuous function.
+```
+
+#using copula package
+```{r}
+library(copula)
+set.seed(100)
+
+#here we specifiy the dependence structure through the copula (here a normal copula) and set the mrginals, the mvdc() function generates the desired distribution. 
+mycop <- normalCopula(param = c(0.4, 0.2, -0.8), dim=3, dispstr = "un")
+mymvd <- mvdc(copula = mycop, margins = c("gamma", "beta", "t"),
+              paramMargins = list(list(shape=2,scale=1),
+                                  list(shape1 =2, shape2=2),
+                                  list(df=5)))
+
+class(mymvd)         # doit retourner "mvdc"
+class(mymvd@copula)  # doit retourner "normalCopula"
+
+#then we can generate random samples using the rmvdc function
+Z2 <- rMvdc(mymvd, 2000)
+
+#comme ca marche pas, alternative
+# Contournement : générer en deux étapes
+U <- rCopula(2000, mycop)          # échantillonner la copule → uniforms [0,1]
+
+# Transformer via les quantiles de chaque marge
+Z2 <- cbind(
+  qgamma(U[,1], shape = 2, scale = 1),
+  qbeta (U[,2], shape1 = 2, shape2 = 2),
+  qt    (U[,3], df = 5)
+)
+
+head(Z2)
+pairs(Z2, pch = ".", col = adjustcolor("steelblue", 0.4))
+
+colnames(Z2) <- c("x1", "x2", "x3")
+pairs.panels(Z2)
+```
+
+#library
+```{r}
+library(readxl)
+library(VineCopula) #to choose copula
+#library(VC2copula)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+```
+
+
+#Wright et al. 2004
+
+```{r}
+
+#data <- read_delim("data/imputed_traits_mean_copula.csv", 
+    #delim = ",", escape_double = FALSE, trim_ws = TRUE)
+
+#Wright et al 2004 GLOPNET data
+data <- read_excel("data/Wright_2004_glopnet_data.xls", 
+    skip = 9)
+
+length(unique(data$Species)) #2022 species not 2548 ! : " The Glopnet data set spans 2,548 species "
+
+species_count <- data%>%
+  group_by(Species)%>%
+  summarise(n=n())%>%
+  filter(n>1)%>%
+  arrange(desc(n))
+
+data_mean <- data %>% 
+  select(-Dataset, -BIOME, -Code)%>%
+  group_by(Species)%>%
+  summarise(across(where(is.numeric), ~mean(.x, na.rm=T)), .groups = "drop")
+
+#get variables back
+var <- data %>%
+  select(Species, GF,  `Decid/E'green`, `Needle/Broad lf`, C3C4, `N2-fixer`)%>%
+  distinct(Species, .keep_all = T)
+
+data_final <- left_join(data_mean, var, by= "Species")%>%
+  relocate(c(GF,  `Decid/E'green`, `Needle/Broad lf`, C3C4, `N2-fixer`), .after=Species) %>%
+  select(Species, GF, `log LL`, `log LMA`, `log Nmass`, `log Pmass`, `log Amass`, `log Rdmass`)
+```
+
+
+#LMA - Nmass
+
+```{r}
+lma <- data_final$`log LMA`
+ln <- data_final$`log Nmass`
+
+plot(lma, ln)
+
+cor(lma, ln, method ='spearman', use= "pairwise.complete.obs") 
+
+#transform in ranks, using pseudo observations 
+#pseudo observations are the observations in the [0,1] interval
+u<- pobs(as.matrix(cbind(lma, ln)))[,1] 
+v<- pobs(as.matrix(cbind(lma, ln)))[,2]
+
+#Select copula
+
+# 1=Gaussian - null copula: queue nulle et structure symétrique
+# 2=Student t
+# 3=Clayton, + 13 rotated Clayton copula (180 degrees; ⁠survival Clayton'') + 23 = rotated Clayton copula (90 degrees) + '33' = rotated Clayton copula (270 degrees)
+# 4=Gumbel, + 14` = rotated Gumbel copula (180 degrees; ⁠survival Gumbel”)+ 24' = rotated Gumbel copula (90 degrees) + '34' = rotated Gumbel copula (270 degrees)
+# 5=Frank, 
+# 6=Joe + 16 = rotated Joe copula (180 degrees; ⁠survival Joe''+'26' = rotated Joe copula (90 degrees)+ '36' = rotated Joe copula (270 degrees)
+
+# Pour une relation négative, utiliser les rotations 
+families <- c(1, 2,3,4,5,6)
+
+# Toutes les familles disponibles dans VineCopula
+all_families <- c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                  13, 14, 16, 17, 18, 19, 20,
+                  23, 24, 26, 27, 28, 29, 30,
+                  33, 34, 36, 37, 38, 39, 40,
+                  104, 114, 124, 134,
+                  204, 214, 224, 234)
+
+#fit one by one to see the different AIC per copulas
+results <- lapply(families, function(f) {
+  fit <- BiCopSelect(u, v, familyset = f, rotations = T) #If TRUE, all rotations of the families in familyset are included (or subtracted). that's why we see a difference between asked and selected
+  data.frame(family_asked = f,
+             family_selected = fit$family,
+             family_name= fit$familyname,
+             BIC = fit$BIC,
+             AIC = fit$AIC, 
+             tau = fit$tau,
+             par1= fit$par,
+             par2 = fit$par2,
+             lower_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$lower, #lower tail dependance 'TD'
+             upper_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$upper) #upper tail dependance 
+})
+
+all_result <- do.call(rbind, results)
+
+all_result %>% mutate(across(where(is.numeric) & !c(family_asked, family_selected),
+                ~ round(.x, 3)))%>%
+  distinct(family_name, .keep_all=T)%>%
+  arrange(desc(AIC))
+
+#Best Copula
+selectedCopula <- BiCopSelect(u, v, familyset =families, rotations = T, presel = F) #presel if TRUE will pre-select copulas to compare for a faster result. essential to set it to false to test all the families in familyset.
+selectedCopula
+summary(selectedCopula)
+
+selectedCopula$family 
+selectedCopula$tau #dépendance négative globale 
+selectedCopula$par # controls overall dependance sterngth must be >= 1 ??
+selectedCopula$par2 #0 controls asymettry entre 0 et 1 
+
+# Densités aux pôles (relation négative --> 0.1/0.9)
+BiCopPDF(0.1, 0.9, selectedCopula)  # densité au pôle acquisitif because lma
+BiCopPDF(0.9, 0.1, selectedCopula)  # densité au pôle conservatif beacause lma
+# comme le premier > le second → couplage plus fort au pôle conservatif
+
+
+# La densité copule se lit par rapport à 1 : une valeur de 3.06 signifie que la co-occurrence (bas SLA, bas N) est 3× plus probable que si les deux traits étaient indépendants. Une valeur de 1.59 signifie 1.6× plus probable. Une asymétrie réelle : densité ~3× au pôle conservatif vs ~1.6× au pôle acquisitif — les contraintes fonctionnelles sont plus serrées pour les faibles valeurs
+
+#Plot
+#grid construction
+u_seq <- seq(0.01, 0.99, length.out = 50)
+v_seq <- seq(0.01, 0.99, length.out = 50)
+grid  <- expand.grid(u = u_seq, v = v_seq)
+grid$density <- BiCopPDF(grid$u, grid$v, selectedCopula)
+
+plot_LMA_Nmass <- ggplot(grid, aes(x = u, y = v, fill = density)) +
+  geom_tile() +
+  geom_contour(aes(z = density), color = "white", 
+               alpha = 0.6, linewidth = 0.4) +
+  scale_fill_gradientn(
+     colours = c("white", "#aad576", "#73a942", "#245501", 
+                "#1a4301"),
+    name    = "Density") +
+  labs(x     = "LMA",
+       y     = "Nmass",
+       subtitle = paste0("Frank copula")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+#useful add aspect.ratio =1 to theme for 1:1 plot
+plot_LMA_Nmass
+```
+
+
+#LMA - Pmass
+```{r}
+lma <- data_final$`log LMA`
+lp <- data_final$`log Pmass`
+
+plot(lma, lp)
+
+cor(lma, lp, method ='spearman', use= "pairwise.complete.obs") #-0.72
+
+u<- pobs(as.matrix(cbind(lma, lp)))[,1] 
+v<- pobs(as.matrix(cbind(lma, lp)))[,2]
+
+#Select copula
+families <- c(1, 2,3,4,5,6)
+
+results <- lapply(families, function(f) {
+  fit <- BiCopSelect(u, v, familyset = f, rotations = T) #If TRUE, all rotations of the families in familyset are included (or subtracted).
+  data.frame(family_asked = f,
+             family_selected = fit$family,
+             family_name= fit$familyname,
+             AIC = fit$AIC, 
+             tau = fit$tau,
+             lower_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$lower, #lower tail dependance 'TD'
+             upper_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$upper) #upper tail dependance 
+})
+
+all_result <- do.call(rbind, results)
+
+all_result %>% mutate(across(where(is.numeric) & !c(family_asked, family_selected),
+                ~ round(.x, 3)))
+
+#Best Copula
+selectedCopula <- BiCopSelect(u, v, familyset = families, rotations = T, presel = F) 
+selectedCopula
+summary(selectedCopula)
+
+selectedCopula$family 
+selectedCopula$tau 
+selectedCopula$par 
+selectedCopula$par2 
+
+# Densités aux pôles (relation négative --> 0.1/0.9)
+BiCopPDF(0.9, 0.1, selectedCopula)  
+BiCopPDF(0.1, 0.9, selectedCopula) 
+
+#Plot
+u_seq <- seq(0.01, 0.99, length.out = 50)
+v_seq <- seq(0.01, 0.99, length.out = 50)
+grid  <- expand.grid(u = u_seq, v = v_seq)
+grid$density <- BiCopPDF(grid$u, grid$v, selectedCopula)
+
+plot_LMA_Pmass <- ggplot(grid, aes(x = u, y = v, fill = density)) +
+  geom_tile() +
+  geom_contour(aes(z = density), color = "white", 
+               alpha = 0.6, linewidth = 0.4) +
+  scale_fill_gradientn(
+     colours = c("white", "#aad576", "#73a942", "#245501", 
+                "#1a4301"),
+    name    = "Density") +
+  labs(x     = "LMA",
+       y     = "Pmass",
+       subtitle = paste0("Gaussian copula")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+
+plot_LMA_Pmass
+```
+
+
+#LMA - Amass
+```{r}
+lma <- data_final$`log LMA`
+a <- data_final$`log Amass` 
+
+plot(lma, a)
+
+cor(lma, a, method ='spearman', use= "pairwise.complete.obs") 
+
+#transform in ranks, using pseudo observations 
+#pseudo observations are the observations in the [0,1] interval
+u<- pobs(as.matrix(cbind(lma, a)))[,1] 
+v<- pobs(as.matrix(cbind(lma, a)))[,2]
+
+#Select copula
+# Pour une relation négative, utiliser les rotations 
+families <- c(1, 2,3,4,5,6)
+
+#fit one by one to see the different AIC per copulas
+results <- lapply(families, function(f) {
+  fit <- BiCopSelect(u, v, familyset = f, rotations = T) #If TRUE, all rotations of the families in familyset are included (or subtracted). that's why we see a difference between asked and selected
+  data.frame(family_asked = f,
+             family_selected = fit$family,
+             family_name= fit$familyname,
+             BIC = fit$BIC,
+             AIC = fit$AIC, 
+             tau = fit$tau,
+             par1= fit$par,
+             par2 = fit$par2,
+             lower_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$lower, #lower tail dependance 'TD'
+             upper_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$upper) #upper tail dependance 
+})
+
+all_result <- do.call(rbind, results)
+
+all_result %>% mutate(across(where(is.numeric) & !c(family_asked, family_selected),
+                ~ round(.x, 3)))%>%
+  distinct(family_name, .keep_all=T)%>%
+  arrange(desc(AIC))
+
+#Best Copula
+selectedCopula <- BiCopSelect(u, v, familyset =families, rotations = T, presel = F) #presel if TRUE will pre-select copulas to compare for a faster result. essential to set it to false to test all the families in familyset.
+selectedCopula
+summary(selectedCopula)
+
+selectedCopula$family #34 rotated Gumbel copula (270 degrees)
+selectedCopula$tau #dépendance négative globale (tau = -0.47)
+selectedCopula$par #-1.91 controls overall dependance sterngth must be >= 1 ??
+selectedCopula$par2 #0 controls asymettry entre 0 et 1 
+
+# Densités aux pôles (relation négative --> 0.1/0.9)
+BiCopPDF(0.1, 0.9, selectedCopula)  # densité au pôle acquisitif because lma
+BiCopPDF(0.9, 0.1, selectedCopula)  # densité au pôle conservatif beacause lma
+# comme le premier > le second → couplage plus fort au pôle conservatif
+
+
+# La densité copule se lit par rapport à 1 : une valeur de 3.06 signifie que la co-occurrence (bas SLA, bas N) est 3× plus probable que si les deux traits étaient indépendants. Une valeur de 1.59 signifie 1.6× plus probable. Une asymétrie réelle : densité ~3× au pôle conservatif vs ~1.6× au pôle acquisitif — les contraintes fonctionnelles sont plus serrées pour les faibles valeurs
+
+#Plot
+#grid construction
+u_seq <- seq(0.01, 0.99, length.out = 50)
+v_seq <- seq(0.01, 0.99, length.out = 50)
+grid  <- expand.grid(u = u_seq, v = v_seq)
+grid$density <- BiCopPDF(grid$u, grid$v, selectedCopula)
+
+plot_LMA_Amass <- ggplot(grid, aes(x = u, y = v, fill = density)) +
+  geom_tile() +
+  geom_contour(aes(z = density), color = "white", 
+               alpha = 0.6, linewidth = 0.4) +
+  scale_fill_gradientn(
+     colours = c("white", "#aad576", "#73a942", "#245501", 
+                "#1a4301"),
+    name    = "Density") +
+  labs(x     = "LMA",
+       y     = "Amass",
+       subtitle = paste0("Gaussian copula")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+#useful add aspect.ratio =1 to theme for 1:1 plot
+plot_LMA_Amass
+```
+
+#LMA-LL
+```{r}
+lma <- data_final$`log LMA`
+ll <- data_final$`log LL` 
+
+plot(lma, ll)
+
+cor(lma, ll, method ='spearman', use= "pairwise.complete.obs")
+
+#transform in ranks, using pseudo observations 
+#pseudo observations are the observations in the [0,1] interval
+u<- pobs(as.matrix(cbind(lma, ll)))[,1] 
+v<- pobs(as.matrix(cbind(lma, ll)))[,2]
+
+#Select copula
+# Pour une relation négative, utiliser les rotations 
+families <- c(1, 2,3,4,5,6)
+
+#fit one by one to see the different AIC per copulas
+results <- lapply(families, function(f) {
+  fit <- BiCopSelect(u, v, familyset = f, rotations = T) #If TRUE, all rotations of the families in familyset are included (or subtracted). that's why we see a difference between asked and selected
+  data.frame(family_asked = f,
+             family_selected = fit$family,
+             family_name= fit$familyname,
+             BIC = fit$BIC,
+             AIC = fit$AIC, 
+             tau = fit$tau,
+             par1= fit$par,
+             par2 = fit$par2,
+             lower_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$lower, #lower tail dependance 'TD'
+             upper_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$upper) #upper tail dependance 
+})
+
+all_result <- do.call(rbind, results)
+
+all_result %>% mutate(across(where(is.numeric) & !c(family_asked, family_selected),
+                ~ round(.x, 3)))%>%
+  distinct(family_name, .keep_all=T)%>%
+  arrange(desc(AIC))
+
+#Best Copula
+selectedCopula <- BiCopSelect(u, v, familyset =families, rotations = T, presel = F) #presel if TRUE will pre-select copulas to compare for a faster result. essential to set it to false to test all the families in familyset.
+selectedCopula
+summary(selectedCopula)
+
+selectedCopula$family #34 rotated Gumbel copula (270 degrees)
+selectedCopula$tau #dépendance négative globale (tau = -0.47)
+selectedCopula$par #-1.91 controls overall dependance sterngth must be >= 1 ??
+selectedCopula$par2 #0 controls asymettry entre 0 et 1 
+
+# Densités aux pôles
+BiCopPDF(0.1, 0.1, selectedCopula)  # densité au pôle acquisitif because lma
+BiCopPDF(0.9, 0.9, selectedCopula)  # densité au pôle conservatif beacause lma
+# comme le premier > le second → couplage plus fort au pôle conservatif
+
+
+# La densité copule se lit par rapport à 1 : une valeur de 3.06 signifie que la co-occurrence (bas SLA, bas N) est 3× plus probable que si les deux traits étaient indépendants. Une valeur de 1.59 signifie 1.6× plus probable. Une asymétrie réelle : densité ~3× au pôle conservatif vs ~1.6× au pôle acquisitif — les contraintes fonctionnelles sont plus serrées pour les faibles valeurs
+
+#Plot
+#grid construction
+u_seq <- seq(0.01, 0.99, length.out = 50)
+v_seq <- seq(0.01, 0.99, length.out = 50)
+grid  <- expand.grid(u = u_seq, v = v_seq)
+grid$density <- BiCopPDF(grid$u, grid$v, selectedCopula)
+
+plot_LMA_LL <- ggplot(grid, aes(x = u, y = v, fill = density)) +
+  geom_tile() +
+  geom_contour(aes(z = density), color = "white", 
+               alpha = 0.6, linewidth = 0.4) +
+  scale_fill_gradientn(
+     colours = c("white", "#aad576", "#73a942", "#245501", 
+                "#1a4301"),
+    name    = "Density") +
+  labs(x     = "LMA",
+       y     = "LL",
+       subtitle = paste0("Survival Clayton copula")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+#useful add aspect.ratio =1 to theme for 1:1 plot
+plot_LMA_LL
+```
+
+#LMA-Rmass
+```{r}
+lma <- data_final$`log LMA`
+r <- data_final$`log Rdmass` 
+
+plot(lma, r)
+
+cor(lma, r, method ='spearman', use= "pairwise.complete.obs")
+
+#transform in ranks, using pseudo observations 
+#pseudo observations are the observations in the [0,1] interval
+u<- pobs(as.matrix(cbind(lma, r)))[,1] 
+v<- pobs(as.matrix(cbind(lma, r)))[,2]
+
+#Select copula
+# Pour une relation négative, utiliser les rotations 
+families <- c(1, 2,3,4,5,6)
+
+#fit one by one to see the different AIC per copulas
+results <- lapply(families, function(f) {
+  fit <- BiCopSelect(u, v, familyset = f, rotations = T) #If TRUE, all rotations of the families in familyset are included (or subtracted). that's why we see a difference between asked and selected
+  data.frame(family_asked = f,
+             family_selected = fit$family,
+             family_name= fit$familyname,
+             BIC = fit$BIC,
+             AIC = fit$AIC, 
+             tau = fit$tau,
+             par1= fit$par,
+             par2 = fit$par2,
+             lower_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$lower, #lower tail dependance 'TD'
+             upper_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$upper) #upper tail dependance 
+})
+
+all_result <- do.call(rbind, results)
+
+all_result %>% mutate(across(where(is.numeric) & !c(family_asked, family_selected),
+                ~ round(.x, 3)))%>%
+  distinct(family_name, .keep_all=T)%>%
+  arrange(desc(AIC))
+
+#Best Copula
+selectedCopula <- BiCopSelect(u, v, familyset =families, rotations = T, presel = F) #presel if TRUE will pre-select copulas to compare for a faster result. essential to set it to false to test all the families in familyset.
+selectedCopula
+summary(selectedCopula)
+
+selectedCopula$family #34 rotated Gumbel copula (270 degrees)
+selectedCopula$tau #dépendance négative globale (tau = -0.47)
+selectedCopula$par #-1.91 controls overall dependance sterngth must be >= 1 ??
+selectedCopula$par2 #0 controls asymettry entre 0 et 1 
+
+# Densités aux pôles
+BiCopPDF(0.1, 0.9, selectedCopula)  # densité au pôle acquisitif because lma
+BiCopPDF(0.9, 0.1, selectedCopula)  # densité au pôle conservatif beacause lma
+# comme le premier > le second → couplage plus fort au pôle conservatif
+
+
+# La densité copule se lit par rapport à 1 : une valeur de 3.06 signifie que la co-occurrence (bas SLA, bas N) est 3× plus probable que si les deux traits étaient indépendants. Une valeur de 1.59 signifie 1.6× plus probable. Une asymétrie réelle : densité ~3× au pôle conservatif vs ~1.6× au pôle acquisitif — les contraintes fonctionnelles sont plus serrées pour les faibles valeurs
+
+#Plot
+#grid construction
+u_seq <- seq(0.01, 0.99, length.out = 50)
+v_seq <- seq(0.01, 0.99, length.out = 50)
+grid  <- expand.grid(u = u_seq, v = v_seq)
+grid$density <- BiCopPDF(grid$u, grid$v, selectedCopula)
+
+plot_LMA_Rmass <- ggplot(grid, aes(x = u, y = v, fill = density)) +
+  geom_tile() +
+  geom_contour(aes(z = density), color = "white", 
+               alpha = 0.6, linewidth = 0.4) +
+  scale_fill_gradientn(
+     colours = c("white", "#aad576", "#73a942", "#245501", 
+                "#1a4301"),
+    name    = "Density") +
+  labs(x     = "LMA",
+       y     = "Rmass",
+       subtitle = paste0("Rotated Clayton 270 degrees")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+#useful add aspect.ratio =1 to theme for 1:1 plot
+plot_LMA_Rmass
+```
+
+#////
+
+#Nmass-Pmass
+```{r}
+Nmass <- data_final$`log Nmass`
+lp <- data_final$`log Pmass` 
+
+plot(Nmass, lp)
+
+cor(Nmass, lp, method ='spearman', use= "pairwise.complete.obs")
+
+#transform in ranks, using pseudo observations 
+#pseudo observations are the observations in the [0,1] interval
+u<- pobs(as.matrix(cbind(Nmass, lp)))[,1] 
+v<- pobs(as.matrix(cbind(Nmass, lp)))[,2]
+
+#Select copula
+# Pour une relation négative, utiliser les rotations 
+families <- c(1, 2,3,4,5,6)
+
+#fit one by one to see the different AIC per copulas
+results <- lapply(families, function(f) {
+  fit <- BiCopSelect(u, v, familyset = f, rotations = T) #If TRUE, all rotations of the families in familyset are included (or subtracted). that's why we see a difference between asked and selected
+  data.frame(family_asked = f,
+             family_selected = fit$family,
+             family_name= fit$familyname,
+             BIC = fit$BIC,
+             AIC = fit$AIC, 
+             tau = fit$tau,
+             par1= fit$par,
+             par2 = fit$par2,
+             lower_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$lower, #lower tail dependance 'TD'
+             upper_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$upper) #upper tail dependance 
+})
+
+all_result <- do.call(rbind, results)
+
+all_result %>% mutate(across(where(is.numeric) & !c(family_asked, family_selected),
+                ~ round(.x, 3)))%>%
+  distinct(family_name, .keep_all=T)%>%
+  arrange(desc(AIC))
+
+#Best Copula
+selectedCopula <- BiCopSelect(u, v, familyset =families, rotations = T, presel = F) #presel if TRUE will pre-select copulas to compare for a faster result. essential to set it to false to test all the families in familyset.
+selectedCopula
+summary(selectedCopula)
+
+selectedCopula$family #34 rotated Gumbel copula (270 degrees)
+selectedCopula$tau #dépendance négative globale (tau = -0.47)
+selectedCopula$par #-1.91 controls overall dependance sterngth must be >= 1 ??
+selectedCopula$par2 #0 controls asymettry entre 0 et 1 
+
+# Densités aux pôles
+BiCopPDF(0.1, 0.1, selectedCopula)  # densité au pôle acquisitif because lma
+BiCopPDF(0.9, 0.9, selectedCopula)  # densité au pôle conservatif beacause lma
+# comme le premier > le second → couplage plus fort au pôle conservatif
+
+
+# La densité copule se lit par rapport à 1 : une valeur de 3.06 signifie que la co-occurrence (bas SLA, bas N) est 3× plus probable que si les deux traits étaient indépendants. Une valeur de 1.59 signifie 1.6× plus probable. Une asymétrie réelle : densité ~3× au pôle conservatif vs ~1.6× au pôle acquisitif — les contraintes fonctionnelles sont plus serrées pour les faibles valeurs
+
+#Plot
+#grid construction
+u_seq <- seq(0.01, 0.99, length.out = 50)
+v_seq <- seq(0.01, 0.99, length.out = 50)
+grid  <- expand.grid(u = u_seq, v = v_seq)
+grid$density <- BiCopPDF(grid$u, grid$v, selectedCopula)
+
+plot_Nmass_Pmass <- ggplot(grid, aes(x = u, y = v, fill = density)) +
+  geom_tile() +
+  geom_contour(aes(z = density), color = "white", 
+               alpha = 0.6, linewidth = 0.4) +
+  scale_fill_gradientn(
+     colours = c("white", "#aad576", "#73a942", "#245501", 
+                "#1a4301"),
+    name    = "Density") +
+  labs(x     = "Nmass",
+       y     = "Pmass",
+       subtitle = paste0("Survival Gumbel")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+#useful add aspect.ratio =1 to theme for 1:1 plot
+plot_Nmass_Pmass
+```
+
+#Nmass-Amass
+```{r}
+Nmass <- data_final$`log Nmass`
+a <- data_final$`log Amass` 
+
+plot(Nmass, a)
+
+cor(Nmass, a, method ='spearman', use= "pairwise.complete.obs")
+
+#transform in ranks, using pseudo observations 
+u<- pobs(as.matrix(cbind(Nmass, a)))[,1] 
+v<- pobs(as.matrix(cbind(Nmass, a)))[,2]
+
+#Select copula
+families <- c(1, 2,3,4,5,6)
+
+#fit one by one to see the different AIC per copulas
+results <- lapply(families, function(f) {
+  fit <- BiCopSelect(u, v, familyset = f, rotations = T) 
+  data.frame(family_asked = f,
+             family_selected = fit$family,
+             family_name= fit$familyname,
+             BIC = fit$BIC,
+             AIC = fit$AIC, 
+             tau = fit$tau,
+             par1= fit$par,
+             par2 = fit$par2,
+             lower_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$lower, 
+             upper_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$upper) 
+})
+
+all_result <- do.call(rbind, results)
+
+all_result %>% mutate(across(where(is.numeric) & !c(family_asked, family_selected),
+                ~ round(.x, 3)))%>%
+  distinct(family_name, .keep_all=T)%>%
+  arrange(desc(AIC))
+
+#Best Copula
+selectedCopula <- BiCopSelect(u, v, familyset =families, rotations = T, presel = F) #presel if TRUE will pre-select copulas to compare for a faster result. essential to set it to false to test all the families in familyset.
+selectedCopula
+summary(selectedCopula)
+
+selectedCopula$family #34 rotated Gumbel copula (270 degrees)
+selectedCopula$tau #dépendance négative globale (tau = -0.47)
+selectedCopula$par #-1.91 controls overall dependance sterngth must be >= 1 ??
+selectedCopula$par2 #0 controls asymettry entre 0 et 1 
+
+# Densités aux pôles
+BiCopPDF(0.9, 0.9, selectedCopula)  # densité au pôle acquisitif because lma
+BiCopPDF(0.1, 0.1, selectedCopula)  # densité au pôle conservatif beacause lma
+
+#Plot
+u_seq <- seq(0.01, 0.99, length.out = 50)
+v_seq <- seq(0.01, 0.99, length.out = 50)
+grid  <- expand.grid(u = u_seq, v = v_seq)
+grid$density <- BiCopPDF(grid$u, grid$v, selectedCopula)
+
+plot_Nmass_Amass <- ggplot(grid, aes(x = u, y = v, fill = density)) +
+  geom_tile() +
+  geom_contour(aes(z = density), color = "white", 
+               alpha = 0.6, linewidth = 0.4) +
+  scale_fill_gradientn(
+     colours = c("white", "#aad576", "#73a942", "#245501", 
+                "#1a4301"),
+    name    = "Density") +
+  labs(x     = "Nmass",
+       y     = "Amass",
+       subtitle = paste0("Gaussian")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+#useful add aspect.ratio =1 to theme for 1:1 plot
+plot_Nmass_Amass
+```
+
+#Nmass-LL
+```{r}
+Nmass <- data_final$`log Nmass`
+ll <- data_final$`log LL` 
+
+plot(Nmass,ll)
+
+cor(Nmass, ll, method ='spearman', use= "pairwise.complete.obs")
+
+#transform in ranks, using pseudo observations 
+u<- pobs(as.matrix(cbind(Nmass, ll)))[,1] 
+v<- pobs(as.matrix(cbind(Nmass, ll)))[,2]
+
+#Select copula
+families <- c(1, 2,3,4,5,6)
+
+#fit one by one to see the different AIC per copulas
+results <- lapply(families, function(f) {
+  fit <- BiCopSelect(u, v, familyset = f, rotations = T) 
+  data.frame(family_asked = f,
+             family_selected = fit$family,
+             family_name= fit$familyname,
+             BIC = fit$BIC,
+             AIC = fit$AIC, 
+             tau = fit$tau,
+             par1= fit$par,
+             par2 = fit$par2,
+             lower_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$lower, 
+             upper_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$upper) 
+})
+
+all_result <- do.call(rbind, results)
+
+all_result %>% mutate(across(where(is.numeric) & !c(family_asked, family_selected),
+                ~ round(.x, 3)))%>%
+  distinct(family_name, .keep_all=T)%>%
+  arrange(desc(AIC))
+
+#Best Copula
+selectedCopula <- BiCopSelect(u, v, familyset =families, rotations = T, presel = F) #presel if TRUE will pre-select copulas to compare for a faster result. essential to set it to false to test all the families in familyset.
+selectedCopula
+summary(selectedCopula)
+
+selectedCopula$family #34 rotated Gumbel copula (270 degrees)
+selectedCopula$tau #dépendance négative globale (tau = -0.47)
+selectedCopula$par #-1.91 controls overall dependance sterngth must be >= 1 ??
+selectedCopula$par2 #0 controls asymettry entre 0 et 1 
+
+# Densités aux pôles
+BiCopPDF(0.9, 0.1, selectedCopula)  # densité au pôle acquisitif because lma
+BiCopPDF(0.1, 0.9, selectedCopula)  # densité au pôle conservatif beacause lma
+
+#Plot
+u_seq <- seq(0.01, 0.99, length.out = 50)
+v_seq <- seq(0.01, 0.99, length.out = 50)
+grid  <- expand.grid(u = u_seq, v = v_seq)
+grid$density <- BiCopPDF(grid$u, grid$v, selectedCopula)
+
+plot_Nmass_LL <- ggplot(grid, aes(x = u, y = v, fill = density)) +
+  geom_tile() +
+  geom_contour(aes(z = density), color = "white", 
+               alpha = 0.6, linewidth = 0.4) +
+  scale_fill_gradientn(
+     colours = c("white", "#aad576", "#73a942", "#245501", 
+                "#1a4301"),
+    name    = "Density") +
+  labs(x     = "Nmass",
+       y     = "LL",
+       subtitle = paste0("Frank")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+#useful add aspect.ratio =1 to theme for 1:1 plot
+plot_Nmass_LL
+```
+
+#Nmass-Rmass
+```{r}
+Nmass <- data_final$`log Nmass`
+r <- data_final$`log Rdmass` 
+
+plot(Nmass,r)
+
+cor(Nmass, r, method ='spearman', use= "pairwise.complete.obs")
+
+#transform in ranks, using pseudo observations 
+u<- pobs(as.matrix(cbind(Nmass, r)))[,1] 
+v<- pobs(as.matrix(cbind(Nmass, r)))[,2]
+
+#Select copula
+families <- c(1, 2,3,4,5,6)
+
+#fit one by one to see the different AIC per copulas
+results <- lapply(families, function(f) {
+  fit <- BiCopSelect(u, v, familyset = f, rotations = T) 
+  data.frame(family_asked = f,
+             family_selected = fit$family,
+             family_name= fit$familyname,
+             BIC = fit$BIC,
+             AIC = fit$AIC, 
+             tau = fit$tau,
+             par1= fit$par,
+             par2 = fit$par2,
+             lower_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$lower, 
+             upper_TD = BiCopPar2TailDep(fit$family, fit$par, fit$par2)$upper) 
+})
+
+all_result <- do.call(rbind, results)
+
+all_result %>% mutate(across(where(is.numeric) & !c(family_asked, family_selected),
+                ~ round(.x, 3)))%>%
+  distinct(family_name, .keep_all=T)%>%
+  arrange(desc(AIC))
+
+#Best Copula
+selectedCopula <- BiCopSelect(u, v, familyset =families, rotations = T, presel = F) #presel if TRUE will pre-select copulas to compare for a faster result. essential to set it to false to test all the families in familyset.
+selectedCopula
+summary(selectedCopula)
+
+selectedCopula$family #34 rotated Gumbel copula (270 degrees)
+selectedCopula$tau #dépendance négative globale (tau = -0.47)
+selectedCopula$par #-1.91 controls overall dependance sterngth must be >= 1 ??
+selectedCopula$par2 #0 controls asymettry entre 0 et 1 
+
+# Densités aux pôles
+BiCopPDF(0.9, 0.9, selectedCopula)  # densité au pôle acquisitif because lma
+BiCopPDF(0.1, 0.1, selectedCopula)  # densité au pôle conservatif beacause lma
+
+#Plot
+u_seq <- seq(0.01, 0.99, length.out = 50)
+v_seq <- seq(0.01, 0.99, length.out = 50)
+grid  <- expand.grid(u = u_seq, v = v_seq)
+grid$density <- BiCopPDF(grid$u, grid$v, selectedCopula)
+
+plot_Nmass_Rmass <- ggplot(grid, aes(x = u, y = v, fill = density)) +
+  geom_tile() +
+  geom_contour(aes(z = density), color = "white", 
+               alpha = 0.6, linewidth = 0.4) +
+  scale_fill_gradientn(
+     colours = c("white", "#aad576", "#73a942", "#245501", 
+                "#1a4301"),
+    name    = "Density") +
+  labs(x     = "Nmass",
+       y     = "Rmass",
+       subtitle = paste0("Survival Clayton")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+#useful add aspect.ratio =1 to theme for 1:1 plot
+plot_Nmass_Rmass
+```
+
+#////
+
+#Pmass-Amass
+#Pmass-LL
+#Pmass-Rmass
+
+#////
+
+#Amass-LL
+#Amass-Rmass
+
+#////
+
+#LL-Rmass
+
+
+#PLOT
+```{r}
+LMA <- ggarrange(plot_LMA_Nmass, plot_LMA_LL, plot_LMA_Pmass, plot_LMA_Amass, plot_LMA_Rmass, ncol = 1, common.legend = T, legend = "bottom")
+Nmass <- ggarrange( NULL, plot_Nmass_LL,plot_Nmass_Pmass, plot_Nmass_Amass, plot_Nmass_Rmass, ncol = 1, common.legend = T, legend = "bottom")
+
+figure1 <- ggarrange(LMA, Nmass, common.legend = T, legend = "bottom")
+figure1
+```
+
